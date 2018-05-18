@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Python 3.5 on Linux
-# author : ryanwang
+# author : Ryan Wang
 # 2018/5
 
 import numpy as np
