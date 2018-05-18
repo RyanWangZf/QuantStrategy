@@ -10,12 +10,8 @@ import pdb
 import gc
 from aiye_data_loader_ticks2 import DBLoader
 
-
-
 logging.basicConfig(level=logging.DEBUG)
 np.random.seed(84) #set random seed
-
-
 
 def _timer(func):
     from functools import wraps
@@ -168,6 +164,7 @@ class extreme_vision(basemodel):
         feature_list = ["Volume","mid","moneyflow","price_range_100","ask_bid_vol_diff"]
         dataset = dataset[feature_list]
         return dataset,feature_list
+    
     def _search_pos_ind(self,df_back,mode="bottom"):
         # return positive samples' index
         dataset = df_back.copy()
@@ -336,7 +333,6 @@ class extreme_vision(basemodel):
             df_back_neg = self._load_tick_back(df,back_days = self.neg_backdays)
             neg_ind_list = self._search_neg_ind(df_back_neg,pos_ind_list)
             neg_ind_list = pd.DataFrame(np.c_[neg_ind_list,\
-
                  [0]*len(neg_ind_list)],columns=["ind","target"])
             ind_list = pd.concat([pos_ind_list,neg_ind_list],axis=0)
             logging.debug("index list loaded, total get %s ticks"%(len(ind_list)))
@@ -380,7 +376,6 @@ class extreme_vision(basemodel):
             print("Test accuracy:",score[1])
             try:
                 model.save("CNN_model.h5")
-
             except:
                 logging.warning("fail saving model, check if module h5py exists")
 
