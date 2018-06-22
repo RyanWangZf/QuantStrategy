@@ -89,25 +89,29 @@ class basemodel():
         while start_date <= end_date:
             date_list.append(start_date.strftime("%Y%m%d"))
             start_date += datetime.timedelta(days=1)
-        close_,high_,low_,poc_ = [],[],[],[]
+        close_,high_,low_,poc_,vol_ = [],[],[],[],[]
         date_index = []
         for date_ in date_list:
             try:
                 this_day = self._load_tick(sid,date_,date_)
             except:
                 continue
+            # ffill 0 
+            this_day.AskPrice1 = this_day.AskPrice1.replace(0,np.nan).fillna(method="ffill").values
+
             date_index.append(date_)
             high = this_day.AskPrice1.max()
-            low = this_day.AskPrice1.min()
+            low = this_day.loc[this_day.AskPrice1>0].AskPrice1.min()
             poc_.append(this_day.AskPrice1.value_counts().argmax())
             high_.append(high)
             low_.append(low)
             close_.append(this_day.AskPrice1.iloc[-1])
-
+            vol_.append(this_day.loc[this_day.AccVolume>0].AccVolume.iloc[-1])
         df["high"] = high_
         df["low"] = low_
         df["close"] = close_
         df["poc"] = poc_
+        df["volume"] = vol_
         df.index = date_index
         return df
 
