@@ -19,7 +19,7 @@ if __name__ == "__main__":
                 while True:
                     var = input("Enter {}:".format(k))
                     components_dict[k] += str(var) + ", "
-                    var = input("Enter any key to for the next item, n for the next author.")
+                    var = input("Enter any key to the next item, n for the next author.")
                     if var != "n":
                         break
             else:
@@ -28,10 +28,10 @@ if __name__ == "__main__":
         
         result = components_dict["author"] + "(%s)"%(components_dict["year"]) + ". " + components_dict["title"] + ", " + \
             components_dict["journal"] + ", " + "%s(%s), "%(components_dict["vol"],components_dict["no"]) + components_dict["page"] + "."
-        print("Result with normal format: \n",result)
-        
-        var = input("Enter any key for next paper, enter 'stop' to break out.")
-        if var == "stop":
+        print("Result with normal format:\n",result)
+        print("-----------------------------------------------------------\n")
+        var = input("Enter any key for next paper, enter 'q' to break out.")
+        if var == "q":
             print("Task Complete!")
             break
         
