@@ -107,6 +107,7 @@ class basemodel():
             low_.append(low)
             close_.append(this_day.AskPrice1.iloc[-1])
             vol_.append(this_day.loc[this_day.AccVolume>0].AccVolume.iloc[-1])
+        df["sid"] = [sid] * len(high_)
         df["high"] = high_
         df["low"] = low_
         df["close"] = close_
