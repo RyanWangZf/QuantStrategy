@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Python 3.5 on Linux
+# Require: LightGBM, Sklearn, Keras, Numpy, Pandas & Matplotlib.
 
 import pandas as pd
 import numpy as np
