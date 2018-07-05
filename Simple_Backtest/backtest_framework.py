@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
+# Python 3.5 on Linux
+# 
+
 from aiye_data_loader_ticks2 import DBLoader
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt
 import logging
 import gc
-import pdb 
-    
+import pdb
+
 logging.basicConfig(level=logging.DEBUG)
 np.random.seed(84) # set random seed
-
+"the server has maximum 40 threads"
 
 class backtest():
 
@@ -20,29 +23,37 @@ class backtest():
         self.end_date = end_date
         self.cash = cash
         self.equity = cash
-        self.position = 0.0 
-        self.look_back = 7 
-        self.fee = 0.0025 # trade fee percent
-        self.sid = sid 
+        self.position = 0.0
+        self.fee = 0.00025 # trade fee percent
+        self.sid = sid
+        self.frozen_position =  0.0 # restriction of T+1 sell
         self.equity_curve = pd.Series()
+        self.trans_record = {"time":[],"tag":[],"volume":[],"price":[]}
         logging.debug("back test start from %s to %s"%(start_date,end_date))
-    
+
     def _load_tick(self,sid,start_date,end_date,start_time=93000000\
                             ,end_time=145500000):
         # basic loader: return cleaned raw tick data
         # attention: this does not process 0 samples in column Price
         db = DBLoader()
-        df = db.load_tick(sid=sid,start_date=start_date,end_date=end_date,start_time=start_time,\
+        if sid not in ["999999"]:
+            df = db.load_tick(sid=sid,start_date=start_date,end_date=end_date,start_time=start_time,\
                     end_time=end_time)
+        else:
+            df = db.load_index(sid=sid,start_date=start_date,end_date=end_date,start_time=start_time,\
+                    end_time=150000000)
         dates = df.index.normalize().unique()
         res = pd.DataFrame()
         for date in dates:
             date_ = date.strftime("%Y%m%d")
-            df1_ = df.loc[date_].resample("1s",label="right",closed="right").last().fillna(method="ffill")
+
+            df1_ = df.loc[date_].resample("1s",label="right",\
+                          closed="right").last().fillna(method="ffill")
             df1_ = pd.concat([df1_.between_time("9:30:01","11:30"),\
                             df1_.between_time("13:00:01","14:55")],axis=0)
-    
+
             res = pd.concat([res,df1_],axis=0)
+
         res = res.resample("3s",label="right",closed="right").last().fillna(method="ffill")
         res = pd.concat([res.between_time("9:30:01","11:30"),res.between_time("13:00:01","14:55")])
         # res = res.loc[df.index]
@@ -56,26 +67,56 @@ class backtest():
         # input dataframe, out look back dataframe
         dataset = df.copy()
         this_date = dataset.index[0]
-        td1 = pd.Timedelta(days=back_days)
-        td2 = pd.Timedelta(days=1)
         sid = df.sid[0]
-        start_date = (this_date - td1).strftime("%Y%m%d")
-        end_date = (this_date - td2).strftime("%Y%m%d")
-        df_back = self._load_tick(sid=sid,start_date=start_date,end_date=end_date)
-        logging.debug("load tick back: %s"%(df_back.shape[0]))
+        tag = True
+        while tag:
+            td1 = pd.Timedelta(days=back_days)
+            td2 = pd.Timedelta(days=1)
+            try:
+                start_date = (this_date - td1).strftime("%Y%m%d")
+                end_date = (this_date - td2).strftime("%Y%m%d")
+                df_back = self._load_tick(sid=sid,start_date=start_date,end_date=end_date)
+                logging.debug("load tick back: %s"%(df_back.shape[0]))
+                tag = False
+            except:
+                back_days += 1
+            if back_days > 10000:
+                raise Exception("Unknown error happened, Timed out.")
         del dataset;gc.collect()
         return df_back
 
     def _train_model(self,df):
         # run every day before trading
         # return class model with method: train() & predict() & fit()
-        from models import extreme_vision
-        ev = extreme_vision(pos_backdays=30,window=100)
-        self.backward_window = 100
+        from models import trend_scout
+        sc = trend_scout(pos_backdays=30,window =300)
+        self.backward_window = 300
         self.forward_window = 50
-        ev.train(df,mode="bottom")
-        self.predictor = ev
+        sc.train(df)
+        print("model extreme vision trained.")
+        self.predictor = sc
 
+    def _trade_operation(self,position,cash,tag,time_,change_position=100,price=0):
+
+        if tag == "long":
+            buy_position = min(change_position,int(cash/((1+0.00025)*price)))
+            position += buy_position
+            cash -= buy_position*price*(1+0.00025)
+            self.trans_record["time"].append(time_)
+            self.trans_record["tag"].append(tag)
+            self.trans_record["volume"].append(buy_position)
+            self.trans_record["price"].append(np.float16(price))
+
+        elif tag == "short":
+            sell_position = min(position,change_position)
+            position -= sell_position
+            cash += sell_position * price *(1-0.00025)
+            self.trans_record["time"].append(time_)
+            self.trans_record["tag"].append(tag)
+            self.trans_record["volume"].append(sell_position)
+            self.trans_record["price"].append(np.float16(price))
+
+        return position,cash
 
     def _before_trading(self,this_date):
         # run once every day before open
@@ -84,126 +125,68 @@ class backtest():
         self.this_day_tick = self._load_tick(self.sid,this_date,this_date)
 
     def _handle_tick(self):
-        # run on every tick, make decisions
-
-        # this day's ticks saved in self.this_day_tick
         try:
             predictor = self.predictor
         except:
-            raise Exception("cannot load pre-trained model")
-        this_day_tick = self.this_day_tick.copy()
-        this_date = this_day_tick.index[0].strftime("%Y-%m-%d")
-        logging.debug("do backtest on the ticks in within %s"%this_date)
+            raise Exception("cannot load pretrained model.")
+        this_day_tick= self.this_day_tick.copy()
+        this_day_feat,feature_list = predictor.generate_feature(this_day_tick)
+        this_day_feat = this_day_feat.dropna()
+
         position = self.position
         cash = self.cash
         equity_list = []
+        curve_ind_list = []
         td = pd.Timedelta(seconds=3)
-        start_tick = this_day_tick.index[0] + (self.backward_window+1)*td
-        end_tick = this_day_tick.index[-1] - (self.forward_window) * td
-        ind_list = this_day_tick.index
-        # ind_list = [ind for ind in ind_list if ind >= start_tick and ind <= end_tick]
+
+        # the following is trade logic
+        this_ind_ar = (np.linspace(1,4700,235)-1).astype(int) # on evert minute
         proba_list = []
-        for ind in ind_list:
-            pred_proba = predictor.predict_on_tick(this_day_tick,ind)
-
+        for ind_ar in this_ind_ar:
+            ind_ = this_day_tick.index[ind_ar]
+            print(ind_)
+            curve_ind_list.append(ind_)
+            equity_list.append(cash+position*this_day_tick.loc[ind_].AskPrice1)
+            pred_proba = predictor.predict_on_tick(this_day_feat,ind_)
             proba_list.append(pred_proba)
+            if pred_proba[1] > 0.9 and pred_proba[2] < 0.5: # find botm
+                position,cash = self._trade_operation(position,cash,"long",ind_,change_position=1000,\
+                        price = this_day_tick.loc[ind_].AskPrice1)
 
-            bidprice = this_day_tick.loc[ind].BidPrice1
-            equity_list.append(bidprice*position+cash)
-            if pred_proba == 1.0 : # change position
-                askprice = this_day_tick.loc[ind].AskPrice1
-                buy_position = 10000
-                if cash - buy_position * askprice < 0 : # cash is exhausted
-                    buy_position = int(cash / askprice)
-                position = position + buy_position
-                cash = cash - (1+self.fee) * buy_position * askprice
-        equity_list = pd.Series(equity_list,index=ind_list)
+            elif pred_proba[2] > 0.9 and pred_proba[1] < 0.5: # find peak
+                position,cash = self._trade_operation(position,cash,"short",ind_,change_position=1000,\
+                        price = this_day_tick.loc[ind_].AskPrice1)
+
+
+
+        equity_list = pd.Series(equity_list,index=curve_ind_list)
         self.equity_curve = pd.concat([self.equity_curve,equity_list],\
                                         axis=0) # record today equity change
-        pdb.set_trace()
+        "params for test"
+        ar_proba= np.array(proba_list)
+        botm = ar_proba[:,1]
+        peak = ar_proba[:,2]
+        ask_price = this_day_tick.AskPrice1
+        # plt.plot(this_day_tick.loc[this_day_tick.index[this_ind_ar]].AskPrice1.values)
         self.position = position
         self.cash = cash
         self.equity = equity_list.values[-1]
-        logging.debug("handle tick compeleted, position: %s"%(self.position))
-        logging.debug("handle tick compeleted, cash: %s"%(self.cash))
-        logging.debug("handle tick compeleted, equity: %s"%(self.equity))
-
-
-    def _handle_tick_quick(self):
-	
-        # this version receive tag_list from _calculate every day instead of loop in ind_list
-        # run on every tick, make decisions
-        # this day's ticks saved in self.this_day_tick
-        tag_list = self.tag_list.copy()
-        this_day_tick = self.this_day_tick.copy()
-        position = self.position
-        cash = self.cash
-        ask = this_day_tick["askprice1"]
-        bid = this_day_tick["bidprice1"]
-
-        position_flow = position + tag_list.cumsum()
-        # attention when position < 0
-        counter = 0
-        t_delta = tag_list.index[1] - tag_list.index[0]
-        pos_below_zero_ind = position_flow[position_flow<0].index
-        while pos_below_zero_ind.shape[0] > 0:
-            pos_last = position_flow[position_flow.index < pos_below_zero_ind[0]]
-            if pos_last.shape[0] == 0:
-                tag_list[tag_list.index[0]] = -1 * position
-            else:
-                tag_list[pos_below_zero_ind[0]] = -1 * pos_last.iloc[-1]
-
-            position_flow = position + tag_list.cumsum()
-            counter += 1
-            pos_below_zero_ind = position_flow[position_flow<0].index
-
-            if counter > len(tag_list):
-                raise ValueError("unknown error happened: position is below zero")
-        position_flow = position + tag_list.cumsum()
-
-        long_ind = tag_list[tag_list>0].index
-        short_ind = tag_list[tag_list<0].index
-        keep_ind = tag_list[tag_list==0].index
-        # ignore the circumstance when cash < 0
-        # take trade fee into consideration
-        cash_flow = pd.concat([-1*(1+self.fee)*tag_list[long_ind]*ask[long_ind],\
-                               -1*(1-self.fee)*tag_list[short_ind]*bid[short_ind],\
-                                tag_list[keep_ind]*0.0],axis=0).sort_index()
-        cash_cumsum = cash + cash_flow.cumsum()
-        this_equity_curve = position_flow * ask + cash_cumsum
-        self.equity_curve = pd.concat([self.equity_curve,this_equity_curve],axis=0).sort_index()
-        # print("this_equity_curve",this_equity_curve[-10:])
-        del this_equity_curve;gc.collect()
-
-        # save today's condition
-        self.position = position_flow.iloc[-1]
-        self.cash = cash_cumsum.iloc[-1]
-        self.equity = self.equity_curve.iloc[-1]
-        logging.debug("handle tick compeleted, position: %s"%(self.position))
-        logging.debug("handle tick compeleted, cash: %s"%(self.cash))
-        logging.debug("handle tick compeleted, equity: %s"%(self.equity))
 
     def _after_trading(self):
         # run once every day after close
-        bidprice = self.this_day_tick.BidPrice1.iloc[-1]
-        self.cash = self.position * bidprice * (1-self.fee) + self.cash
+
+
+        self.frozen_position = 0.0 # reset frozen position
+        askprice = self.this_day_tick.AskPrice1.iloc[-1]
+        self.cash = self.position * askprice * (1-self.fee) + self.cash
         self.position = 0.0
+        self.equity = self.cash
+        logging.info("handle tick compeleted, position: %s"%(self.position))
+        logging.info("handle tick compeleted, cash: %s"%(self.cash))
+        logging.info("handle tick compeleted, equity: %s"%(self.equity))
+
         # try doing incremental learning every day after trading
         # self.predictor.update(self.this_day_tick,mode="bottom")
-
-
-    def _calculate(self,insample,outsample):
-        # doing calculations, get tags of every tick
-        # output pd.Seires()
-        df_back = insample.copy()
-        df = outsample.copy()
-        tag_list = np.zeros(len(df))
-        tag_list[0] = 100000
-        tag_list[-1] = -100000
-        tag_list = pd.Series(tag_list,name="tags",index=df.index)
-        self.tag_list = tag_list.copy()
-        del tag_list;gc.collect()
-        logging.debug("calculate completed, tag_list length: %s"%(self.tag_list.shape[0]))
 
     def run(self):
         # start running the back test
@@ -215,17 +198,24 @@ class backtest():
         self._train_model(df_samples)
 
         for date in self.date_list:
-            self._before_trading(this_date=date)
+            try:
+                self._before_trading(this_date=date)
+            except:
+                logging.debug("%s is not trading day, skip it"%(date))
+                continue
             self._handle_tick()
             self._after_trading()
 
         logging.debug("backtest completed")
         logging.debug("equity: %s"%(self.equity))
+        df_trans= pd.DataFrame(self.trans_record)
+        self.trans_record = df_trans.loc[df_trans.volume>0].sort_values(by=\
+                                  "time").reset_index(drop=True)
         # after simulation of auto-trade completed    
         # call plot_curve() get return curve 
         # call benchmarks() get benchmarks of return etc. 
 
-    def plot_curve():
+    def plot_curve(self):
         import matplotlib.pyplot as plt
         if len(self.equity_curve) < 1:
             raise Exception("call plot curve before running backtest")
@@ -233,18 +223,67 @@ class backtest():
         plt.title("performance of equity curve")
         plt.show()
 
-    def benchmark():
-        pass
+
+    def benchmark(self):
+        try:
+            equity_curve = self.equity_curve.copy()
+        except:
+            raise Exception("call equity_curve before running backtest.")
+
+        ret_curve = (equity_curve - equity_curve.iloc[0])/self.equity_curve.iloc[0]
+
+        hs300 = self._load_tick(sid="999999",start_date=self.start_date,\
+                                end_date=self.end_date)
+
+        hs_curve = (hs300.Price - hs300.Price.iloc[0])/hs300.Price.iloc[0]
+
+        ret_curve = ret_curve.resample("1d").last().fillna(method="ffill")
+        hs_curve = hs_curve.resample("1d").last().fillna(method="ffill")
+        ret_curve = ret_curve.loc[hs_curve.index] # keep same length
+        ret_curve.fillna(method="ffill",inplace=True)
+        # alpha
+        alpha_ = ret_curve.iloc[-1] - hs_curve.iloc[-1]
+        # beta
+        beta_ = np.polyfit(hs_curve,ret_curve,1)[0]
+        # sharpe ratio
+        sharpe_ratio = ret_curve.iloc[-1]/ret_curve.std()
+        # alpha curve
+        alpha_curve = ret_curve - hs_curve
+        alpha_curve.fillna(method="ffill",inplace=True)
+
+        print("Alpha:",alpha_)
+        print("Beta:",beta_)
+        print("Sharpe Ratio:",sharpe_ratio)
+
+        # average volume-weighted short price & long price
+        trans_df = self.trans_record
+        vwap_short = trans_df.loc[trans_df.tag=="short"]
+        vwap_short = (vwap_short.price*vwap_short.volume).sum()/vwap_short.volume.sum()
+
+        vwap_long = trans_df.loc[trans_df.tag=="long"]
+        vwap_long = (vwap_long.price*vwap_long.volume).sum()/vwap_long.volume.sum()
+        print("vol-weighted average buy price :",vwap_long)
+        print("vol-weighted average sell price :",vwap_short)
+
+        plt.subplot(211)
+        plt.plot(alpha_curve.values,c="red",alpha=0.75)
+        plt.title("alpha curve of investment")
+        plt.subplot(212)
+
+        plt.plot(hs_curve.values,c="orange",alpha=0.75,label="index")
+        plt.plot(ret_curve.values,c="red",label="investment")
+        plt.title("return curve of market index and investment")
+        plt.legend()
+        plt.show()
 
 
 
+if __name__ == "__main__":
 
+    bt = backtest("000001","20170101","20170201")
+    bt.run()
 
-
-
-
-
-
-
+    pdb.set_trace()
+    print("backtest completed.")
 
 
